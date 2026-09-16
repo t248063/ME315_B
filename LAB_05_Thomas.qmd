@@ -1,0 +1,255 @@
+---
+title: "Lab_05_Thomas.qmd"
+author: "Thomas Toledo Travassos"
+format: pdf
+editor: visual
+---
+
+
+###LAB_ESPECIAL
+
+
+1. Carregando os packages que iremos utilizar temos;
+
+```{r}
+library(tidyverse)
+library(readr)
+library(leaflet)
+library(lubridate)
+```
+
+
+
+2. Criando a Função `analisa_aeronave` temos;
+
+```{r}
+analisa_aeronave <- function(tail_number, arquivo) {
+  
+  # Leitura do arquivo por partes
+  voos <- list()
+  
+  callback <- DataFrameCallback$new(function(dados, pos) {
+    
+    dados_aeronave <- dados %>%
+      filter(TAIL_NUMBER == tail_number)
+    
+    if (nrow(dados_aeronave) > 0) {
+      voos[[length(voos) + 1]] <<- dados_aeronave
+    }
+  })
+  
+  read_csv_chunked(
+    arquivo,
+    callback = callback,
+    chunk_size = 100000,
+    progress = FALSE
+  )
+  
+  
+  # Junta os resultados
+  if (length(voos) == 0) {
+    stop("Aeronave não encontrada.")
+  }
+  
+  tabela_voos <- bind_rows(voos)
+  
+  
+  # Remove voos cancelados e registros sem aeroportos
+  tabela_voos <- tabela_voos %>%
+    filter(
+      CANCELLED == 0,
+      !is.na(ORIGIN_AIRPORT),
+      !is.na(DESTINATION_AIRPORT)
+    )
+  
+  
+  # Converte horário de partida para número e cria data/hora
+  tabela_voos <- tabela_voos %>%
+    mutate(
+      DEPARTURE_TIME = as.numeric(DEPARTURE_TIME),
+      hora = floor(DEPARTURE_TIME / 100),
+      minuto = DEPARTURE_TIME %% 100,
+      data_hora = make_datetime(
+        YEAR,
+        MONTH,
+        DAY,
+        hora,
+        minuto
+      )
+    ) %>%
+    arrange(data_hora)
+  
+  
+  # Importa coordenadas dos aeroportos
+  arquivo_aeroportos <- file.path(
+    dirname(arquivo),
+    "airports.csv"
+  )
+  
+  aeroportos <- read_csv(
+    arquivo_aeroportos,
+    show_col_types = FALSE
+  ) %>%
+    select(
+      IATA_CODE,
+      LATITUDE,
+      LONGITUDE
+    )
+  
+  
+  # Coordenadas dos aeroportos de origem
+  tabela_voos <- tabela_voos %>%
+    left_join(
+      aeroportos %>%
+        rename(
+          ORIGIN_LATITUDE = LATITUDE,
+          ORIGIN_LONGITUDE = LONGITUDE
+        ),
+      by = c("ORIGIN_AIRPORT" = "IATA_CODE")
+    )
+  
+  
+  # Coordenadas dos aeroportos de destino
+  tabela_voos <- tabela_voos %>%
+    left_join(
+      aeroportos %>%
+        rename(
+          DESTINATION_LATITUDE = LATITUDE,
+          DESTINATION_LONGITUDE = LONGITUDE
+        ),
+      by = c("DESTINATION_AIRPORT" = "IATA_CODE")
+    )
+  
+  
+  # Calcula velocidade média
+  tabela_voos <- tabela_voos %>%
+    mutate(
+      AIR_TIME = as.numeric(AIR_TIME),
+      DISTANCE = as.numeric(DISTANCE),
+      VELOCIDADE_MEDIA = ifelse(
+        !is.na(AIR_TIME) & AIR_TIME > 0,
+        DISTANCE / (AIR_TIME / 60),
+        NA
+      )
+    )
+  
+  
+  # Cria o mapa
+  mapa <- leaflet() %>%
+    addTiles()
+  
+  
+  # Identifica os aeroportos utilizados
+  aeroportos_mapa <- bind_rows(
+    tabela_voos %>%
+      transmute(
+        IATA_CODE = ORIGIN_AIRPORT,
+        LATITUDE = ORIGIN_LATITUDE,
+        LONGITUDE = ORIGIN_LONGITUDE
+      ),
+    
+    tabela_voos %>%
+      transmute(
+        IATA_CODE = DESTINATION_AIRPORT,
+        LATITUDE = DESTINATION_LATITUDE,
+        LONGITUDE = DESTINATION_LONGITUDE
+      )
+  ) %>%
+    distinct(IATA_CODE, .keep_all = TRUE) %>%
+    filter(
+      !is.na(LATITUDE),
+      !is.na(LONGITUDE)
+    )
+  
+  
+  # Adiciona aeroportos ao mapa
+  mapa <- mapa %>%
+    addCircleMarkers(
+      data = aeroportos_mapa,
+      lng = ~LONGITUDE,
+      lat = ~LATITUDE,
+      radius = 5,
+      popup = ~IATA_CODE
+    )
+  
+  
+  # Adiciona os voos em ordem cronológica
+  for (i in seq_len(nrow(tabela_voos))) {
+    
+    voo <- tabela_voos[i, ]
+    
+    if (
+      !is.na(voo$ORIGIN_LATITUDE) &&
+      !is.na(voo$ORIGIN_LONGITUDE) &&
+      !is.na(voo$DESTINATION_LATITUDE) &&
+      !is.na(voo$DESTINATION_LONGITUDE)
+    ) {
+      
+      mapa <- mapa %>%
+        addPolylines(
+          lng = c(
+            voo$ORIGIN_LONGITUDE,
+            voo$DESTINATION_LONGITUDE
+          ),
+          lat = c(
+            voo$ORIGIN_LATITUDE,
+            voo$DESTINATION_LATITUDE
+          ),
+          weight = ifelse(
+            is.na(voo$VELOCIDADE_MEDIA),
+            2,
+            max(2, min(10, voo$VELOCIDADE_MEDIA / 100))
+          ),
+          popup = paste0(
+            voo$ORIGIN_AIRPORT,
+            " → ",
+            voo$DESTINATION_AIRPORT,
+            "<br>Velocidade média: ",
+            round(voo$VELOCIDADE_MEDIA, 2),
+            " milhas/h"
+          )
+        )
+    }
+  }
+  
+  
+  # Retorna tabela e mapa
+  list(
+    tabela = tabela_voos,
+    mapa = mapa
+  )
+}
+```
+
+
+
+
+3. Executando a Função temos;
+
+```{r}
+resultado <- analisa_aeronave(
+  tail_number = "N431WN",
+  arquivo = "datasets/flights.csv"
+)
+```
+
+4. Tabela;
+
+```{r}
+resultado$tabela
+```
+
+5. Mapa;
+
+```{r}
+resultado$mapa
+```
+
+
+```{r}
+Sys.setenv(TZ = "America/Sao_Paulo")
+Sys.time()
+```
+
+
+
